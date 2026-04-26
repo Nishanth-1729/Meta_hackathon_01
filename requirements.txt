@@ -1,7 +1,7 @@
 # ── PyTorch CUDA 12.1 (pinned — must come first so pip resolver never overrides it) ──
 --extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.2.0+cu121
-torchvision==0.17.0+cu121
+torch>=2.2.0
+torchvision>=0.17.0
 
 # ── OpenEnv framework (latest release — required for hackathon compliance) ────
 openenv-core
@@ -14,8 +14,8 @@ requests
 httpx
 
 # ── ML training stack ─────────────────────────────────────────────────────────
-# NO unsloth / NO bitsandbytes — they require CUDA 13 libs not present in CUDA 12.1
-# Qwen2.5-3B in bf16 = ~6 GB on A10G — no quantization needed
+# Cloud training stack (A10G Small / 24GB VRAM)
+# Qwen2.5-3B in bf16 fits comfortably — no quantization needed
 transformers>=4.40.0,<4.60.0
 datasets>=2.16.0
 trl>=0.9.0,<0.20.0
@@ -31,3 +31,4 @@ tree-sitter
 tree-sitter-c
 faiss-cpu
 sentence-transformers
+gradio

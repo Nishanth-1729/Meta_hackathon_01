@@ -24,9 +24,9 @@ tags:
 | 🌐 **Live Environment** | https://adithyakommuri-meta-hackathon-final.hf.space/docs |
 | 🤖 **Trained Model** | https://huggingface.co/Adithyakommuri/crust-grpo-qwen25-3b |
 | 📝 **Blog Post** | [Blog.md](Blog.md) |
-| 💻 **GitHub** | https://github.com/22adi66/meta_pytorch_scalar_hackathon |
+| 💻 **GitHub** | https://github.com/Nishanth-1729/Meta_hackathon_01.git |
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/22adi66/meta_pytorch_scalar_hackathon/blob/master/CRust_Training_Colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Nishanth-1729/Meta_hackathon_01/blob/master/CRust_Training_Colab.ipynb)
 
 ---
 

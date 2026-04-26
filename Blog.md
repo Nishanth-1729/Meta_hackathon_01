@@ -126,6 +126,12 @@ The GRPO algorithm works by sampling 4 completions per prompt, computing relativ
 
 ---
 
+## 🚀 Training on Hugging Face Spaces
+
+CRust is designed to train directly on the Space's **A10G Small GPU**. By leveraging `trl` and `bf16`, we can run full GRPO rollouts on a 3B parameter model in real-time.
+
+---
+
 ## Anti-Reward Hacking
 
 We specifically designed against the obvious exploits:
@@ -177,7 +183,7 @@ curl -X POST https://adithyakommuri-meta-hackathon-final.hf.space/step \
 
 **Trained model:** [Adithyakommuri/crust-grpo-qwen25-3b](https://huggingface.co/Adithyakommuri/crust-grpo-qwen25-3b)  
 **Training notebook:** [CRust_Training_Colab.ipynb](CRust_Training_Colab.ipynb)  
-**GitHub:** [22adi66/meta_pytorch_scalar_hackathon](https://github.com/22adi66/meta_pytorch_scalar_hackathon)
+**GitHub:** [Nishanth-1729/Meta_hackathon_01](https://github.com/Nishanth-1729/Meta_hackathon_01.git)
 
 ---
 

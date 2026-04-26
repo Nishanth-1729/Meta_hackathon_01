@@ -1,41 +1,29 @@
 # Python
 __pycache__/
 *.py[cod]
-*.egg-info/
-.venv/
+*$py.class
 venv/
-env/
-dist/
-build/
-*.egg
+.env
 
-# Rust build artifacts
-target/
-Cargo.lock
-
-# Model outputs
-crust_model_outputs/
-*.safetensors
+# Model weights and artifacts
+crust_outputs/
+crust_lora/
 *.bin
 *.pt
-*.pth
+*.safetensors
 
-# Docker
-DockerDesktopInstaller.exe
+# Visualizations (Binary files)
+*.png
+*.jpg
+*.jpeg
+*.gif
+reward_curve.png
 
-# IDE
-.idea/
-.vscode/
-*.swp
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
 
 # OS
 .DS_Store
 Thumbs.db
-
-# PDFs (binary files not allowed on HF Spaces)
-*.pdf
-*.PDF
-
-# Environment
-.env
-*.env
