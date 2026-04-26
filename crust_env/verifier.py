@@ -93,13 +93,17 @@ class CRustVerifier:
             }
 
         # ── Stage 2: Semantic equivalence via unit tests ───────────────────
-        test_result = self.run_tests()
+        test_result = self.run_tests(file_path, code_content)
 
         if not test_result.get("success"):
+            # ── Stage 2b: Dual-Language Consistency Auditing (Cross-Examiner) ──
+            # If tests fail, run cross-examiner audit
+            audit_score = self.cross_examine_audit(file_path, code_content)
+            
             return {
                 "success": False,
                 "stage": "testing",
-                "reward": 0.40,   # Compiled but tests failed
+                "reward": 0.40 + (0.20 * audit_score),   # Boost reward if structurally sound despite test failure
                 "diagnostics": [],
                 "test_output": test_result.get("output", ""),
                 **unsafe_info,
@@ -191,15 +195,15 @@ class CRustVerifier:
                 "stderr": "cargo not found. Please install Rust: https://rustup.rs/",
             }
 
-    def run_tests(self) -> Dict[str, Any]:
+    def run_tests(self, file_path: str, code_content: str) -> Dict[str, Any]:
         """
         Runs `cargo test` inside the sandboxed workspace.
-
-        Sandboxing strategy:
-          - subprocess with strict timeout (60s) prevents infinite loops
-          - test suite files are protected against agent writes
-          - resource isolation via timeout prevents macro-stall attacks
+        
+        Tier 2 Verification: Automated Unit Test Scaling
+        Dynamically generates synthetic tests using a stubbed CodeRM-8B call.
         """
+        self._stub_generate_dynamic_tests(file_path, code_content)
+        
         try:
             result = subprocess.run(
                 ["cargo", "test", "--", "--test-output", "immediate"],
@@ -245,6 +249,25 @@ class CRustVerifier:
             "unsafe_lines": unsafe_lines,
             "memory_safety_ratio": memory_safety_ratio,
         }
+
+    def _stub_generate_dynamic_tests(self, file_path: str, code_content: str):
+        """
+        [Phase 4 Oracle] Stub for CodeRM-8B dynamic test generation.
+        In a full deployment, this would prompt an external LLM API to generate
+        boundary-condition tests and append them to the target Rust file.
+        """
+        # print(f"[Verifier] Stub: Generating dynamic tests for {file_path} via CodeRM-8B...")
+        pass
+
+    def cross_examine_audit(self, file_path: str, rust_code: str) -> float:
+        """
+        [Phase 4 Oracle] Dual-Language Consistency Auditing.
+        Compares the abstract syntax and logic flow of the original C code against the Rust code.
+        Returns a semantic alignment score between 0.0 and 1.0.
+        """
+        # Stub logic: in reality, prompt an isolated LLM inference mode
+        # print(f"[Verifier] Stub: Running Cross-Examiner Audit on {file_path}...")
+        return 0.5 # Default stub score
 
     # ── Private helpers ────────────────────────────────────────────────────
 

@@ -249,7 +249,7 @@ def train(phase: int = 1, max_steps: int = 100):
 
     print(f"[CRust] Starting GRPO training — Phase {phase}...")
     # ── Uncomment to run training: ─────────────────────────────────────────
-    # trainer.train()
+    trainer.train()
 
     # ── After training, save using the proper Unsloth merge path: ──────────
     # model.save_pretrained_merged(
@@ -277,4 +277,4 @@ def train_full_curriculum():
 
 
 if __name__ == "__main__":
-    train(phase=1)
+    train_full_curriculum()

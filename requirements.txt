@@ -27,3 +27,7 @@ huggingface_hub>=0.21.0
 numpy
 tqdm
 matplotlib
+tree-sitter
+tree-sitter-c
+faiss-cpu
+sentence-transformers

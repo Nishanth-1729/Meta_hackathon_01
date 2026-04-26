@@ -2,50 +2,50 @@
 CRust Dependency Scheduler — scheduler.py
 
 Builds a Directed Acyclic Graph (DAG) from a legacy C codebase by parsing
-local `#include "..."` directives, then produces a bottom-up (leaf-first)
-topological migration schedule.
-
-This is the core of the "Divide-Transpile-Reconstruct" paradigm:
-  1. Leaf nodes  → no internal dependencies  → translate first
-  2. Middle nodes → depend on translated leaves → translate next
-  3. Root nodes  → entire DAG already migrated → translate last
-
-This strategy limits the "blast radius" of any single breaking change and
-prevents sparse-reward stalls by keeping early tasks tractable.
+local files into AST nodes (Semantic Slicing) using tree-sitter, then produces
+a bottom-up topological migration schedule.
 """
 
 import os
 import re
-from collections import deque
+from collections import deque, defaultdict
 from typing import Dict, List, Set, Optional, Tuple
+
+try:
+    import tree_sitter_c
+    from tree_sitter import Language, Parser
+except ImportError:
+    pass # Will be installed via requirements.txt
 
 
 class CDependencyGraph:
     """
-    Parses a C project directory tree and constructs a file-level dependency DAG.
+    Parses a C project directory tree and constructs an AST-level dependency DAG.
 
-    Nodes  = .c and .h files (identified by basename)
-    Edges  = directed from includer → included
-             (A depends on B means A must be translated AFTER B)
-
-    Topological sort produces a leaf-first ordering suitable for the
-    bottom-up migration strategy described in the research paper.
+    Nodes  = functions, structs, and declarations
+    Edges  = directed from caller/user → callee/definition
     """
 
     def __init__(self, c_code_dir: str):
         self.c_code_dir = c_code_dir
-        # adjacency: file → list of files it depends on
-        self.graph: Dict[str, List[str]] = {}
-        # reverse: file → list of files that depend on it
-        self.reverse_graph: Dict[str, List[str]] = {}
+        self.graph: Dict[str, List[str]] = defaultdict(list)
+        self.reverse_graph: Dict[str, List[str]] = defaultdict(list)
         self.nodes: Set[str] = set()
-        # mapping from basename → absolute path
-        self._file_map: Dict[str, str] = {}
-
-    # ── Graph construction ─────────────────────────────────────────────────
+        self._node_code: Dict[str, str] = {}
+        self._node_file: Dict[str, str] = {}
+        
+        if hasattr(tree_sitter_c, 'LANGUAGE'):
+            self.LANGUAGE = tree_sitter_c.LANGUAGE
+        else:
+            self.LANGUAGE = Language(tree_sitter_c.language())
+            
+        self.parser = Parser()
+        if hasattr(self.parser, 'language'):
+            self.parser.language = self.LANGUAGE
+        else:
+            self.parser.set_language(self.LANGUAGE)
 
     def _find_files(self) -> List[str]:
-        """Recursively find all .c and .h files in the project directory."""
         files: List[str] = []
         if not os.path.isdir(self.c_code_dir):
             return files
@@ -55,123 +55,112 @@ class CDependencyGraph:
                     files.append(os.path.join(root, filename))
         return files
 
-    def _parse_includes(self, file_path: str) -> List[str]:
-        """
-        Extract local includes: `#include "filename.h"` or `#include "path/file.h"`
-        Ignores system includes: `#include <stdio.h>`.
-        Returns basenames of included files (for DAG node matching).
-        """
-        pattern = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.MULTILINE)
-        includes: List[str] = []
-        try:
-            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
-            for match in pattern.finditer(content):
-                # Normalize to basename for graph matching
-                included_name = os.path.basename(match.group(1))
-                includes.append(included_name)
-        except OSError:
-            pass
-        return includes
-
     def build_graph(self) -> None:
-        """
-        Build the forward and reverse dependency graphs.
-        Uses basenames as node IDs for simplicity (MVP-safe; handles flat/nested src/).
-        """
         files = self._find_files()
-
-        # Build filename → absolute path mapping
-        self._file_map = {}
+        
+        # Parse all files and extract nodes (functions/structs)
         for f in files:
-            basename = os.path.basename(f)
-            # Last-one-wins if duplicates (prefer src/ over include/ for .c files)
-            self._file_map[basename] = f
+            with open(f, 'rb') as file:
+                source_code = file.read()
+                
+            tree = self.parser.parse(source_code)
+            root_node = tree.root_node
+            
+            for node in root_node.children:
+                if node.type in ['function_definition', 'struct_specifier', 'declaration']:
+                    name = None
+                    if node.type == 'function_definition':
+                        declarator = node.child_by_field_name('declarator')
+                        while declarator and declarator.type != 'identifier':
+                            declarator = declarator.child_by_field_name('declarator')
+                        if declarator:
+                            name = source_code[declarator.start_byte:declarator.end_byte].decode('utf8')
+                    elif node.type == 'struct_specifier':
+                        name_node = node.child_by_field_name('name')
+                        if name_node:
+                            name = "struct_" + source_code[name_node.start_byte:name_node.end_byte].decode('utf8')
+                    elif node.type == 'declaration':
+                        type_node = node.child_by_field_name('type')
+                        if type_node and type_node.type == 'struct_specifier':
+                            name_node = type_node.child_by_field_name('name')
+                            if name_node:
+                                name = "struct_" + source_code[name_node.start_byte:name_node.end_byte].decode('utf8')
+                    
+                    if name:
+                        self.nodes.add(name)
+                        self._node_code[name] = source_code[node.start_byte:node.end_byte].decode('utf8')
+                        self._node_file[name] = os.path.basename(f)
+                        
+                        # Find dependencies
+                        def find_deps(n):
+                            if n.type == 'call_expression':
+                                func_node = n.child_by_field_name('function')
+                                if func_node and func_node.type == 'identifier':
+                                    dep_name = source_code[func_node.start_byte:func_node.end_byte].decode('utf8')
+                                    if dep_name != name:
+                                        self.graph[name].append(dep_name)
+                                        self.reverse_graph[dep_name].append(name)
+                            elif n.type == 'type_identifier':
+                                type_name = source_code[n.start_byte:n.end_byte].decode('utf8')
+                                dep_name = "struct_" + type_name
+                                if dep_name != name:
+                                    self.graph[name].append(dep_name)
+                                    self.reverse_graph[dep_name].append(name)
+                            for child in n.children:
+                                find_deps(child)
+                                
+                        find_deps(node)
 
-        # Initialize graph nodes
-        for basename in self._file_map:
-            self.nodes.add(basename)
-            self.graph.setdefault(basename, [])
-            self.reverse_graph.setdefault(basename, [])
-
-        # Add edges based on #include directives
-        for basename, abs_path in self._file_map.items():
-            for dep_name in self._parse_includes(abs_path):
-                if dep_name not in self.nodes:
-                    # Header referenced but not found → add as virtual node
-                    self.nodes.add(dep_name)
-                    self.graph.setdefault(dep_name, [])
-                    self.reverse_graph.setdefault(dep_name, [])
-
-                # Edge: basename depends on dep_name
-                if dep_name not in self.graph[basename]:
-                    self.graph[basename].append(dep_name)
-                if basename not in self.reverse_graph[dep_name]:
-                    self.reverse_graph[dep_name].append(basename)
-
-    def get_topological_schedule(self) -> List[str]:
+    def get_topological_schedule(self) -> List[Dict]:
         """
-        Kahn's algorithm for topological sort — returns leaf-first order.
-
-        Leaf nodes (in-degree = 0, no dependencies) are served first.
-        If a cycle is detected (circular includes), remaining nodes are appended
-        as a best-effort fallback so the environment can still make progress.
-
-        Returns:
-            List of C/H filenames in the recommended migration order.
+        Kahn's algorithm for topological sort — returns leaf-first order of AST nodes.
+        Returns: List of dicts with node info.
         """
         self.build_graph()
 
         if not self.nodes:
             return []
 
-        # Compute in-degree: number of local dependencies each file has
         in_degree: Dict[str, int] = {node: 0 for node in self.nodes}
         for node, deps in self.graph.items():
-            in_degree[node] = len(deps)
+            in_degree[node] = len([d for d in deps if d in self.nodes])
 
-        # Start with all nodes that have no dependencies (true leaf nodes)
-        queue: deque = deque(
-            sorted(n for n in self.nodes if in_degree[n] == 0)
-        )
-        schedule: List[str] = []
+        queue: deque = deque(sorted(n for n in self.nodes if in_degree[n] == 0))
+        schedule_names: List[str] = []
 
         while queue:
             node = queue.popleft()
-            schedule.append(node)
+            schedule_names.append(node)
 
-            # For every node that depends on `node`, reduce its in-degree
             for dependent in sorted(self.reverse_graph.get(node, [])):
-                in_degree[dependent] -= 1
-                if in_degree[dependent] == 0:
-                    queue.append(dependent)
+                if dependent in in_degree:
+                    in_degree[dependent] -= 1
+                    if in_degree[dependent] == 0:
+                        queue.append(dependent)
 
-        # Cycle detection fallback: add remaining unscheduled nodes
-        if len(schedule) != len(self.nodes):
-            scheduled_set = set(schedule)
+        if len(schedule_names) != len(self.nodes):
+            scheduled_set = set(schedule_names)
             for node in sorted(self.nodes):
                 if node not in scheduled_set:
-                    schedule.append(node)
+                    schedule_names.append(node)
 
-        # Filter to only .c files for the migration schedule
-        # (.h headers are context, not translation targets)
-        c_schedule = [f for f in schedule if f.endswith(".c")]
-        h_schedule = [f for f in schedule if f.endswith(".h")]
+        schedule = []
+        for name in schedule_names:
+            schedule.append({
+                "name": name,
+                "file": self._node_file[name],
+                "code": self._node_code[name]
+            })
 
-        # Headers come first as context, then .c files in dependency order
-        return h_schedule + c_schedule
+        return schedule
 
     def get_dependency_info(self) -> Dict[str, Dict]:
-        """
-        Returns rich dependency metadata for each node.
-        Used by the observation to give the agent architectural context.
-        """
         self.build_graph()
         info: Dict[str, Dict] = {}
         for node in self.nodes:
             info[node] = {
-                "depends_on": self.graph.get(node, []),
-                "depended_by": self.reverse_graph.get(node, []),
-                "abs_path": self._file_map.get(node),
+                "depends_on": list(set(self.graph.get(node, []))),
+                "depended_by": list(set(self.reverse_graph.get(node, []))),
+                "file": self._node_file.get(node),
             }
         return info

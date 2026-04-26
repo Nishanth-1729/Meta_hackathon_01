@@ -14,19 +14,20 @@ import os
 import re
 
 from .verifier import CRustVerifier
-from .scheduler import CDependencyGraph
+from .orchestrator import SemanticOrchestrator
 from .metrics import ModularityMetrics
+import json
+try:
+    from sentence_transformers import SentenceTransformer
+    import faiss
+    import numpy as np
+except ImportError:
+    pass
 
-# ── OpenEnv base class (pip install openenv-core) ─────────────────────────────
-# We inherit from the official openenv.core Environment base class so that
-# the framework's tooling (openenv validate, openenv push, client discovery)
-# can identify this as a compliant OpenEnv environment.
 try:
     from openenv.core.env_server.interfaces import Environment as _OpenEnvBase
 except ImportError:
-    # Fallback if openenv-core is not installed (e.g. local dev without pip install)
     class _OpenEnvBase:  # type: ignore
-        """Minimal shim matching the openenv.core.env_server.interfaces.Environment API."""
         def reset(self, **kwargs): raise NotImplementedError
         def step(self, action): raise NotImplementedError
         @property
@@ -34,36 +35,21 @@ except ImportError:
 
 
 class MigrationEnv(_OpenEnvBase):
-    """
-    CRust: C-to-Rust Repository Migration RL Environment.
-
-    Core innovations implemented here:
-    1. Dependency-aware topological scheduling (leaf-first translation order)
-    2. Multi-objective verifiable rewards (compilation + tests + safety + modularity)
-    3. Process supervision rewards (partial credit per compiler error cleared)
-    4. Curriculum learning phases (Phase 1 → 4 escalating complexity)
-    5. Multi-constraint instruction following (injected at reset())
-    6. Anti-reward-hacking guardrails (unsafe penalty, CBO penalty, step limit)
-    """
-
     DEFAULT_CONSTRAINTS: List[str] = [
         "Do not use the unsafe keyword",
         "Maintain a CBO score below 3",
     ]
 
-    # ── Reward weights (sum to 1.0 at maximum) ────────────────────────────
-    W_COMPILATION   = 0.30   # cargo check passes
-    W_TESTS         = 0.30   # cargo test passes (semantic equivalence)
-    W_MEMORY_SAFE   = 0.20   # no unsafe blocks (memory safety)
-    W_CBO           = 0.10   # coupling between objects < 3
-    W_COHESION      = 0.10   # LCOM cohesion score
+    W_COMPILATION   = 0.30
+    W_TESTS         = 0.30
+    W_MEMORY_SAFE   = 0.20
+    W_CBO           = 0.10
+    W_COHESION      = 0.10
 
-    # ── Penalties ─────────────────────────────────────────────────────────
-    P_UNSAFE_USED   = 0.50   # hard penalty for violating unsafe constraint
-    P_HIGH_CBO      = 0.20   # penalty for violating CBO constraint
+    P_UNSAFE_USED   = 0.50
+    P_HIGH_CBO      = 0.20
 
-    # ── Process supervision ───────────────────────────────────────────────
-    PROCESS_REWARD_PER_ERROR_CLEARED = 0.02   # reward each cleared compiler error
+    PROCESS_REWARD_PER_ERROR_CLEARED = 0.02
 
     def __init__(self, workspace_dir: str, legacy_dir: Optional[str] = None):
         self.workspace_dir = workspace_dir
@@ -73,64 +59,70 @@ class MigrationEnv(_OpenEnvBase):
         self.session_id = str(uuid.uuid4())
         self.verifier = CRustVerifier(workspace_dir)
 
-        # Internal state — uninitialized until reset()
         self._current_state: Dict[str, Any] = {"status": "uninitialized"}
         self._constraints: List[str] = []
         self._step_count: int = 0
         self._max_steps: int = 200
         self._phase: int = 1
 
-        self._schedule: List[str] = []        # topologically sorted C file names
-        self._current_idx: int = 0            # pointer into schedule
-        self._translated: Dict[str, str] = {} # fname → rust code (already done)
-        self._error_history: List[Dict] = []  # recent compiler diagnostics
-        self._prev_error_count: int = 0       # for process supervision delta
-
-    # ── OpenEnv Interface ─────────────────────────────────────────────────
+        self._schedule: List[Dict[str, str]] = []
+        self._current_idx: int = 0
+        self._validation_phase: str = "transpile" # "transpile" or "refactor"
+        self._translated: Dict[str, str] = {}
+        self._error_history: List[Dict] = []
+        self._prev_error_count: int = 0
+        
+        # FAISS Epistemic Context Engine
+        self.embedding_model = None
+        self.faiss_index = None
+        self.faiss_mapping: List[str] = []
+        try:
+            self.embedding_model = SentenceTransformer('BAAI/bge-small-en-v1.5')
+            self.faiss_index = faiss.IndexFlatL2(384) # BGE-small output dim
+        except Exception as e:
+            print(f"[env.py] FAISS/SentenceTransformer not available: {e}")
 
     def reset(
         self,
         constraints: Optional[List[str]] = None,
         phase: int = 1,
     ) -> Dict[str, Any]:
-        """
-        Reset the environment for a new episode.
-
-        Args:
-            constraints: Multi-constraint directives injected at episode start.
-                         If None, uses defaults (no unsafe, CBO < 3).
-            phase: Curriculum phase 1-4.
-                   Phase 1 = isolated leaf node (simplest).
-                   Phase 2 = two-file chain.
-                   Phase 3 = cross-file with headers.
-                   Phase 4 = full repository cascade (long-horizon).
-        """
         self._step_count = 0
         self._phase = max(1, min(4, phase))
         self._constraints = list(constraints) if constraints else list(self.DEFAULT_CONSTRAINTS)
         self._translated = {}
         self._error_history = []
         self._prev_error_count = 0
+        self._validation_phase = "transpile"
 
-        # Build dependency-aware topological schedule from legacy C source
-        scheduler = CDependencyGraph(self.legacy_dir)
-        full_schedule = scheduler.get_topological_schedule()
+        # Epistemic Context Engine reset
+        if self.faiss_index:
+            self.faiss_index.reset()
+        self.faiss_mapping = []
 
-        # Curriculum gating: expose a controlled subset based on phase
+        orchestrator = SemanticOrchestrator(self.legacy_dir, self.workspace_dir)
+        manifest_path = orchestrator.generate_scaffolding()
+        
+        with open(manifest_path, 'r') as f:
+            manifest = json.load(f)
+            
+        full_schedule = [{"name": m["node_name"], "file": m["source_c_file"]} for m in manifest["modules"]]
+
         if self._phase == 1:
-            self._schedule = full_schedule[:1]    # single leaf node
+            self._schedule = full_schedule[:1]
         elif self._phase == 2:
-            self._schedule = full_schedule[:2]    # leaf + one dependent
+            self._schedule = full_schedule[:2]
         elif self._phase == 3:
-            self._schedule = full_schedule[:3]    # partial DAG
+            self._schedule = full_schedule[:3]
         else:
-            self._schedule = full_schedule        # full repository
+            self._schedule = full_schedule
 
         self._current_idx = 0
 
         self._current_state = {
             "status": "ready",
             "phase": self._phase,
+            "validation_phase": self._validation_phase,
             "schedule": self._schedule,
             "current_idx": self._current_idx,
             "files_total": len(self._schedule),
@@ -144,27 +136,9 @@ class MigrationEnv(_OpenEnvBase):
         return self.observation()
 
     def step(self, action: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Apply one agent action to the environment.
-
-        Action format:
-            {
-                "file_path": "src/math_ops.rs",     # target Rust file path
-                "code_content": "pub fn add(...)"   # generated Rust code
-            }
-
-        Returns:
-            {
-                "observation": {...},   # next observation
-                "reward": float,        # clamped [0.01, 0.99]
-                "done": bool,           # True when episode ends
-                "info": {...}           # diagnostics, breakdown, metrics
-            }
-        """
         self._step_count += 1
         self._current_state["step_count"] = self._step_count
 
-        # ── Hard episode termination ───────────────────────────────────────
         if self._step_count >= self._max_steps:
             return self._format_response(
                 done=True, reward=0.01,
@@ -180,39 +154,47 @@ class MigrationEnv(_OpenEnvBase):
                 info={"error": "Invalid action: file_path and code_content are required."}
             )
 
-        # ── Step 1: Sandboxed compilation + test verification ─────────────
         verification = self.verifier.verify(action)
-
-        # ── Step 2: Modularity metrics ────────────────────────────────────
         metrics = ModularityMetrics.evaluate(code_content)
         self._current_state["metrics"] = metrics
 
-        # ── Step 3: Compute multi-objective reward ─────────────────────────
         reward, breakdown = self._compute_reward(code_content, verification, metrics)
 
-        # ── Step 4: Process supervision — reward clearing compiler errors ──
-        current_errors = [
-            d for d in verification.get("diagnostics", [])
-            if d.get("level") == "error"
-        ]
+        current_errors = [d for d in verification.get("diagnostics", []) if d.get("level") == "error"]
         errors_cleared = max(0, self._prev_error_count - len(current_errors))
         process_reward = errors_cleared * self.PROCESS_REWARD_PER_ERROR_CLEARED
         reward = min(0.99, reward + process_reward)
         self._prev_error_count = len(current_errors)
         self._error_history = verification.get("diagnostics", [])[-10:]
 
-        # ── Step 5: Advance schedule on success ────────────────────────────
         success = verification.get("success", False)
         episode_done = False
 
         if success:
-            self._translated[file_path] = code_content
-            self._current_idx += 1
-            self._current_state["files_done"] = self._current_idx
-            self._current_state["translated_files"] = list(self._translated.keys())
+            if self._validation_phase == "transpile":
+                # In transpile phase, success means it compiles and passes tests (even if unsafe is used)
+                self._validation_phase = "refactor"
+                self._current_state["validation_phase"] = self._validation_phase
+            elif self._validation_phase == "refactor":
+                # Check if unsafe is actually removed (handled by compute_reward logic, but here we advance)
+                unsafe_count = verification.get("unsafe_count", 0)
+                if unsafe_count == 0 or not any("unsafe" in c.lower() for c in self._constraints):
+                    self._translated[file_path] = code_content
+                    
+                    # Epistemic Context Engine: Embed successful translation
+                    if self.embedding_model and self.faiss_index:
+                        embedding = self.embedding_model.encode([code_content])[0]
+                        self.faiss_index.add(np.array([embedding]))
+                        self.faiss_mapping.append(code_content)
+                        
+                    self._current_idx += 1
+                    self._validation_phase = "transpile"
+                    self._current_state["files_done"] = self._current_idx
+                    self._current_state["translated_files"] = list(self._translated.keys())
+                    self._current_state["validation_phase"] = self._validation_phase
 
-            if self._current_idx >= len(self._schedule):
-                episode_done = True   # 🎉 entire repository migrated
+                    if self._current_idx >= len(self._schedule):
+                        episode_done = True
 
         self._current_state.update({
             "current_idx": self._current_idx,
@@ -234,7 +216,6 @@ class MigrationEnv(_OpenEnvBase):
 
     @property
     def state(self) -> Dict[str, Any]:
-        """Full internal state (used by /state endpoint for debugging)."""
         return {
             **self._current_state,
             "session_id": self.session_id,
@@ -242,69 +223,61 @@ class MigrationEnv(_OpenEnvBase):
         }
 
     def observation(self) -> Dict[str, Any]:
-        """
-        Partial observation returned to the agent.
-        Includes: current C source, active constraints, compiler errors, dependency context.
-        This is deliberately partial — the agent cannot see global state.
-        """
         target = self._get_current_target()
-        c_source = self._read_c_source(target) if target else ""
+        c_source = target.get("code", "") if target else ""
+        target_name = target.get("name", "") if target else ""
         dep_context = self._get_dependency_context()
 
+        # Define the HRL Role
+        hrl_role = "Manager: Analyze dependencies and plan" if self._validation_phase == "transpile" else "Worker: Remove unsafe blocks and refactor"
+
         return {
-            "current_target": target,
+            "current_target": target_name,
             "c_source_code": c_source,
             "constraints": self._constraints,
             "recent_errors": self._error_history[-5:],
             "dependency_context": dep_context,
             "phase": self._phase,
+            "validation_phase": self._validation_phase,
+            "hrl_role": hrl_role,
             "files_remaining": max(0, len(self._schedule) - self._current_idx),
             "step": self._step_count,
         }
 
-    # ── Private helpers ────────────────────────────────────────────────────
-
-    def _get_current_target(self) -> Optional[str]:
+    def _get_current_target(self) -> Optional[Dict[str, str]]:
         if self._current_idx < len(self._schedule):
             return self._schedule[self._current_idx]
         return None
 
-    def _read_c_source(self, filename: str) -> str:
-        """Locate and read the C source file from the legacy directory."""
-        for root, _, files in os.walk(self.legacy_dir):
-            if filename in files:
-                try:
-                    with open(os.path.join(root, filename), "r", encoding="utf-8") as f:
-                        return f.read()
-                except Exception:
-                    pass
-        return f"// Source not found: {filename}"
-
     def _get_dependency_context(self) -> Dict[str, str]:
-        """
-        Return public function signatures of already-translated Rust modules.
-        Injects foundational type/API context into the next translation step.
-        """
         context: Dict[str, str] = {}
-        for fname, code in self._translated.items():
-            sigs = re.findall(r'pub fn\s+\w+[^{]+', code)
-            pub_types = re.findall(r'pub (?:struct|enum|type)\s+\w+[^{;]*', code)
-            context[fname] = "\n".join(sigs + pub_types)
+        target = self._get_current_target()
+        target_name = target.get("name", "") if target else ""
+        
+        # If FAISS is available and we have translated units, perform semantic retrieval
+        if self.embedding_model and self.faiss_index and self.faiss_index.ntotal > 0:
+            query_embedding = self.embedding_model.encode([target_name])[0]
+            k = min(3, self.faiss_index.ntotal) # Top-3 most relevant translations
+            distances, indices = self.faiss_index.search(np.array([query_embedding]), k)
+            
+            for idx in indices[0]:
+                if idx >= 0 and idx < len(self.faiss_mapping):
+                    code = self.faiss_mapping[idx]
+                    sigs = re.findall(r'pub fn\s+\w+[^{]+', code)
+                    pub_types = re.findall(r'pub (?:struct|enum|type)\s+\w+[^{;]*', code)
+                    context[f"retrieved_context_{idx}"] = "\\n".join(sigs + pub_types)
+        else:
+            # Fallback to appending all translated logic
+            for fname, code in self._translated.items():
+                sigs = re.findall(r'pub fn\s+\w+[^{]+', code)
+                pub_types = re.findall(r'pub (?:struct|enum|type)\s+\w+[^{;]*', code)
+                context[fname] = "\\n".join(sigs + pub_types)
+                
         return context
 
     def _compute_reward(
         self, code: str, verification: Dict, metrics: Dict
     ) -> Tuple[float, Dict]:
-        """
-        Multi-objective reward computation.
-
-        Components (all independently verifiable — no LLM judge):
-        1. Compilation success (cargo check)
-        2. Test pass rate (cargo test — semantic equivalence)
-        3. Memory safety (no unsafe blocks)
-        4. Low coupling (CBO < 3)
-        5. High cohesion (LCOM → 0)
-        """
         reward = 0.0
         breakdown: Dict[str, float] = {}
 
@@ -313,13 +286,11 @@ class MigrationEnv(_OpenEnvBase):
         compiled = stage in ("testing", "complete")
         diag = verification.get("diagnostics") or []
 
-        # ── 1. Compilation ─────────────────────────────────────────────────
         if compiled:
             reward += self.W_COMPILATION
             breakdown["compilation"] = self.W_COMPILATION
         else:
             error_count = sum(1 for d in diag if d.get("level") == "error")
-            # Partial credit: compiled but had warnings only
             if error_count == 0 and diag:
                 partial = self.W_COMPILATION * 0.5
                 reward += partial
@@ -327,7 +298,6 @@ class MigrationEnv(_OpenEnvBase):
             else:
                 breakdown["compilation"] = 0.0
 
-        # ── 2. Tests (semantic equivalence) ───────────────────────────────
         if success:
             reward += self.W_TESTS
             breakdown["tests"] = self.W_TESTS
@@ -336,11 +306,14 @@ class MigrationEnv(_OpenEnvBase):
         else:
             breakdown["tests"] = 0.0
 
-        # ── 3. Memory safety ───────────────────────────────────────────────
         unsafe_count = len(re.findall(r'\bunsafe\b', code))
         unsafe_violated = any("unsafe" in c.lower() for c in self._constraints)
 
-        if unsafe_count > 0 and unsafe_violated:
+        # In transpile phase, we don't heavily penalize unsafe (Neuro-Symbolic step 1)
+        # In refactor phase, we DO penalize it (Neuro-Symbolic step 2)
+        apply_unsafe_penalty = (self._validation_phase == "refactor")
+
+        if unsafe_count > 0 and unsafe_violated and apply_unsafe_penalty:
             reward -= self.P_UNSAFE_USED
             breakdown["unsafe_penalty"] = -self.P_UNSAFE_USED
             breakdown["memory_safety"] = 0.0
@@ -351,7 +324,6 @@ class MigrationEnv(_OpenEnvBase):
             reward += mem_reward
             breakdown["memory_safety"] = mem_reward
 
-        # ── 4. Coupling (CBO) ──────────────────────────────────────────────
         cbo = metrics.get("cbo", 0)
         cbo_constraint = any("cbo" in c.lower() for c in self._constraints)
 
@@ -364,7 +336,6 @@ class MigrationEnv(_OpenEnvBase):
             reward += cbo_reward
             breakdown["cbo"] = round(cbo_reward, 4)
 
-        # ── 5. Cohesion (LCOM) ─────────────────────────────────────────────
         lcom = metrics.get("lcom", 0)
         cohesion_score = max(0.0, 1.0 - lcom / 5.0)
         cohesion_reward = round(self.W_COHESION * cohesion_score, 4)
