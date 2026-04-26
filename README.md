@@ -19,7 +19,12 @@ tags:
 
 > **Meta PyTorch OpenEnv Hackathon 2026 · Theme #2: Super Long-Horizon Planning & Instruction Following**
 
-**[🌐 Live Environment](https://adithyakommuri-meta-hackathon-final.hf.space/docs) · [🤖 Trained Model](https://huggingface.co/Adithyakommuri/crust-grpo-qwen25-3b) · [📝 Blog Post](Blog.md)**
+| | Link |
+|---|---|
+| 🌐 **Live Environment** | https://adithyakommuri-meta-hackathon-final.hf.space/docs |
+| 🤖 **Trained Model** | https://huggingface.co/Adithyakommuri/crust-grpo-qwen25-3b |
+| 📝 **Blog Post** | [Blog.md](Blog.md) |
+| 💻 **GitHub** | https://github.com/22adi66/meta_pytorch_scalar_hackathon |
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/22adi66/meta_pytorch_scalar_hackathon/blob/master/CRust_Training_Colab.ipynb)
 

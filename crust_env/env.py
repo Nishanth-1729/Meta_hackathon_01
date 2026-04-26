@@ -17,34 +17,23 @@ from .verifier import CRustVerifier
 from .scheduler import CDependencyGraph
 from .metrics import ModularityMetrics
 
-
-class OpenEnv:
-    """
-    Base class defining the OpenEnv Hackathon Interface.
-    Conforms to the Gym-style reset/step/state/observation standard.
-    """
-
-    def reset(self, **kwargs) -> Dict[str, Any]:
-        """Resets the environment to an initial state and returns first observation."""
-        raise NotImplementedError
-
-    def step(self, action: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Applies an action to the environment.
-        Returns: {observation, reward, done, info}
-        """
-        raise NotImplementedError
-
-    def state(self) -> Dict[str, Any]:
-        """Returns the fully observable internal state (for debugging/visualization)."""
-        raise NotImplementedError
-
-    def observation(self) -> Dict[str, Any]:
-        """Returns the partial observation available to the agent."""
-        raise NotImplementedError
+# ── OpenEnv base class (pip install openenv-core) ─────────────────────────────
+# We inherit from the official openenv.core Environment base class so that
+# the framework's tooling (openenv validate, openenv push, client discovery)
+# can identify this as a compliant OpenEnv environment.
+try:
+    from openenv.core.env_server.interfaces import Environment as _OpenEnvBase
+except ImportError:
+    # Fallback if openenv-core is not installed (e.g. local dev without pip install)
+    class _OpenEnvBase:  # type: ignore
+        """Minimal shim matching the openenv.core.env_server.interfaces.Environment API."""
+        def reset(self, **kwargs): raise NotImplementedError
+        def step(self, action): raise NotImplementedError
+        @property
+        def state(self): raise NotImplementedError
 
 
-class MigrationEnv(OpenEnv):
+class MigrationEnv(_OpenEnvBase):
     """
     CRust: C-to-Rust Repository Migration RL Environment.
 
@@ -243,6 +232,7 @@ class MigrationEnv(OpenEnv):
 
         return self._format_response(episode_done, reward, info)
 
+    @property
     def state(self) -> Dict[str, Any]:
         """Full internal state (used by /state endpoint for debugging)."""
         return {

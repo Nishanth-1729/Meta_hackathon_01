@@ -137,7 +137,7 @@ def step_env(action: StepAction) -> Dict[str, Any]:
 
 @app.get("/state", summary="Full internal state (debugging)")
 def get_state() -> Dict[str, Any]:
-    return crust_env.state()
+    return crust_env.state
 
 
 @app.get("/observation", summary="Agent-visible partial observation")
@@ -161,7 +161,7 @@ def env_info() -> Dict[str, Any]:
         "project": "CRust — C-to-Rust RL Migration Environment",
         "hackathon": "Meta OpenEnv Hackathon — Theme #2: Long-Horizon Planning",
         "interface": "OpenEnv (reset / step / state / observation)",
-        "training_stack": "TRL GRPO + Unsloth + FastAPI (runs on this Space's A10G GPU)",
+        "training_stack": "TRL GRPO + PEFT LoRA + FastAPI (runs on this Space's A10G GPU)",
         "default_constraints": [
             "Do not use the unsafe keyword",
             "Maintain a CBO score below 3",
